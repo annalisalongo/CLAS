@@ -194,18 +194,141 @@ def financials(line="Tutto"):
     return {**s,"costi_eff":eff,"costi_prev":prev}
 
 def kpis(f):
-    cols=st.columns(7)
-    data=[
-        ("Vendite effettive",f["vendite"]),
-        ("Sconti",f["sconti"]),
-        ("Incassato",f["incassato"]),
-        ("Da incassare",f["credito"]),
-        ("Costi effettivi",f["costi_eff"]),
-        ("Costi previsti",f["costi_prev"]),
-        ("Risultato*",f["vendite"]-f["costi_eff"])
-    ]
-    for c,(lab,val) in zip(cols,data): c.metric(lab,euro(val))
-    st.caption("* Risultato gestionale semplice: vendite registrate meno costi effettivi. Non è un utile fiscale.")
+    risultato=float(f["vendite"])-float(f["costi_eff"])
+    a,b,c,d=st.columns(4)
+    a.metric("💰 Vendite",euro(f["vendite"]))
+    b.metric("✅ Incassato",euro(f["incassato"]))
+    c.metric("⏳ Da incassare",euro(f["credito"]))
+    d.metric("📉 Costi effettivi",euro(f["costi_eff"]))
+    a,b,c=st.columns(3)
+    a.metric("🏷️ Sconti",euro(f["sconti"]))
+    b.metric("🧾 Costi previsti",euro(f["costi_prev"]))
+    c.metric("📊 Risultato",euro(risultato))
+    st.caption("Risultato gestionale = vendite registrate − costi effettivi. Non è un utile fiscale.")
+
+def personal_balance(person):
+    bal=0.0
+    for r in query("SELECT type,amount FROM cash_moves WHERE person=?",(person,)):
+        t=(r["type"] or "").lower(); a=float(r["amount"] or 0)
+        if "prelievo" in t and "restituzione" not in t: bal+=a
+        elif "restituzione prelievo" in t: bal-=a
+        elif "anticipo personale" in t: bal-=a
+        elif "rimborso anticipo" in t: bal+=a
+        elif "rettifica +" in t: bal+=a
+        elif "rettifica -" in t: bal-=a
+    return bal
+
+def edit_sale():
+    rows=query("SELECT * FROM sales ORDER BY sale_date DESC,id DESC")
+    if not rows: st.info("Nessuna vendita."); return
+    labels={f'#{r["id"]} · {r["sale_date"]} · {r["customer"]} · {r["format"]} · {euro(r["actual_total"])}':r for r in rows}
+    r=labels[st.selectbox("Seleziona vendita",list(labels),key="edit_sale_select")]
+    with st.form("edit_sale_form"):
+        a,b,c,d=st.columns(4)
+        dt=a.date_input("Data",datetime.strptime(r["sale_date"][:10],"%Y-%m-%d").date())
+        ln=b.selectbox("Linea",LINES,index=LINES.index(r["line"]) if r["line"] in LINES else 0)
+        customer=c.text_input("Cliente",r["customer"])
+        fmt=d.selectbox("Formato",list(FORMATS),index=list(FORMATS).index(r["format"]) if r["format"] in FORMATS else 0)
+        a,b,c,d=st.columns(4)
+        qty=a.number_input("Quantità venduta",0,1000,int(r["qty"] or 0))
+        gift=b.number_input("Omaggi",0,1000,int(r["gift_qty"] or 0))
+        unit=c.number_input("Prezzo unitario €",0.0,1000.0,float(r["list_unit_price"] or 0),0.5)
+        discount=d.number_input("Sconto €",0.0,10000.0,float(r["discount"] or 0),0.5)
+        actual=max(0,qty*unit-discount)
+        paid=st.selectbox("Pagato?",["No","Sì"],index=1 if r["paid"] else 0)
+        a,b=st.columns(2)
+        methods=[""]+PAY_METHODS
+        collectors=[""]+PEOPLE
+        method=a.selectbox("Metodo",methods,index=methods.index(r["payment_method"]) if r["payment_method"] in methods else 0)
+        collector=b.selectbox("Incassato da",collectors,index=collectors.index(r["collected_by"]) if r["collected_by"] in collectors else 0)
+        notes=st.text_input("Note",r["notes"] or "")
+        st.caption(f"Nuovo totale effettivo: {euro(actual)}")
+        if st.form_submit_button("💾 Salva modifiche"):
+            c=conn(); c.execute("""UPDATE sales SET sale_date=?,line=?,customer=?,format=?,qty=?,gift_qty=?,
+                list_unit_price=?,discount=?,actual_total=?,paid=?,payment_method=?,collected_by=?,notes=? WHERE id=?""",
+                (str(dt),ln,customer.strip(),fmt,qty,gift,unit,discount,actual,1 if paid=="Sì" else 0,method,collector,notes,r["id"]))
+            c.commit(); c.close(); st.rerun()
+    ok=st.checkbox("Confermo eliminazione vendita",key=f'ds_{r["id"]}')
+    if st.button("🗑️ Elimina vendita",disabled=not ok,key=f'dsb_{r["id"]}'):
+        c=conn(); c.execute("DELETE FROM sales WHERE id=?",(r["id"],)); c.commit(); c.close(); st.rerun()
+
+def edit_cost():
+    rows=query("SELECT * FROM costs ORDER BY cost_date DESC,id DESC")
+    if not rows: st.info("Nessun costo."); return
+    labels={f'#{r["id"]} · {r["cost_date"]} · {r["description"]} · {euro(r["total"])}':r for r in rows}
+    r=labels[st.selectbox("Seleziona costo",list(labels),key="edit_cost_select")]
+    with st.form("edit_cost_form"):
+        a,b,c,d=st.columns(4)
+        dt=a.date_input("Data",datetime.strptime(r["cost_date"][:10],"%Y-%m-%d").date(),key="ecdt")
+        opts=["Estate","Natale","Generale Apiario"]
+        ln=b.selectbox("Attribuzione",opts,index=opts.index(r["line"]) if r["line"] in opts else 0)
+        cat=c.selectbox("Categoria",COST_CATS,index=COST_CATS.index(r["category"]) if r["category"] in COST_CATS else len(COST_CATS)-1)
+        status=d.selectbox("Tipo",COST_STATUS,index=COST_STATUS.index(r["status"]) if r["status"] in COST_STATUS else 0)
+        desc=st.text_input("Voce",r["description"])
+        a,b,c=st.columns(3)
+        qty=a.number_input("Quantità",0.0,100000.0,float(r["qty"] or 0),key="ecqty")
+        unit=b.number_input("Costo unitario €",0.0,100000.0,float(r["unit_cost"] or 0),key="ecunit")
+        paidby=c.selectbox("Pagato da",PEOPLE,index=PEOPLE.index(r["paid_by"]) if r["paid_by"] in PEOPLE else 0)
+        notes=st.text_input("Note",r["notes"] or "",key="ecnotes")
+        if st.form_submit_button("💾 Salva costo"):
+            c=conn(); c.execute("""UPDATE costs SET cost_date=?,line=?,category=?,description=?,qty=?,unit_cost=?,
+                total=?,status=?,paid_by=?,notes=? WHERE id=?""",
+                (str(dt),ln,cat,desc,qty,unit,qty*unit,status,paidby,notes,r["id"]))
+            c.commit(); c.close(); st.rerun()
+    ok=st.checkbox("Confermo eliminazione costo",key=f'dc_{r["id"]}')
+    if st.button("🗑️ Elimina costo",disabled=not ok,key=f'dcb_{r["id"]}'):
+        c=conn(); c.execute("DELETE FROM costs WHERE id=?",(r["id"],)); c.commit(); c.close(); st.rerun()
+
+def edit_cash_move():
+    rows=query("SELECT * FROM cash_moves ORDER BY move_date DESC,id DESC")
+    if not rows: st.info("Nessun movimento."); return
+    labels={f'#{r["id"]} · {r["move_date"]} · {r["person"]} · {r["type"]} · {euro(r["amount"])}':r for r in rows}
+    r=labels[st.selectbox("Seleziona movimento",list(labels),key="edit_cash_select")]
+    types=["Prelievo da restituire","Restituzione prelievo","Anticipo personale","Rimborso anticipo","Rettifica +","Rettifica -"]
+    with st.form("edit_cash_form"):
+        a,b,c=st.columns(3)
+        dt=a.date_input("Data",datetime.strptime(r["move_date"][:10],"%Y-%m-%d").date(),key="emdt")
+        person=b.selectbox("Persona",["Chiara","Annalisa"],index=0 if r["person"]=="Chiara" else 1)
+        typ=c.selectbox("Movimento",types,index=types.index(r["type"]) if r["type"] in types else 0)
+        amount=st.number_input("Importo €",0.0,100000.0,float(r["amount"] or 0),1.0,key="emamt")
+        notes=st.text_input("Note",r["notes"] or "",key="emnotes")
+        if st.form_submit_button("💾 Salva movimento"):
+            c=conn(); c.execute("UPDATE cash_moves SET move_date=?,person=?,type=?,amount=?,notes=? WHERE id=?",
+                (str(dt),person,typ,amount,notes,r["id"]))
+            c.commit(); c.close(); st.rerun()
+    ok=st.checkbox("Confermo eliminazione movimento",key=f'dm_{r["id"]}')
+    if st.button("🗑️ Elimina movimento",disabled=not ok,key=f'dmb_{r["id"]}'):
+        c=conn(); c.execute("DELETE FROM cash_moves WHERE id=?",(r["id"],)); c.commit(); c.close(); st.rerun()
+
+def edit_inventory():
+    rows=query("SELECT * FROM inventory_lots ORDER BY movement_date DESC,id DESC")
+    if not rows: st.info("Nessun movimento di magazzino."); return
+    labels={f'#{r["id"]} · {r["movement_date"]} · {r["line"]} · {r["item_type"]} · {r["format"] or ""}':r for r in rows}
+    r=labels[st.selectbox("Seleziona movimento",list(labels),key="edit_inv_select")]
+    with st.form("edit_inv_form"):
+        a,b,c=st.columns(3)
+        dt=a.date_input("Data",datetime.strptime(r["movement_date"][:10],"%Y-%m-%d").date(),key="eidt")
+        ln=b.selectbox("Linea",LINES,index=LINES.index(r["line"]) if r["line"] in LINES else 0,key="eiln")
+        typ=c.selectbox("Tipo",["Miele sfuso","Vasetti"],index=0 if r["item_type"]=="Miele sfuso" else 1,key="eityp")
+        fmt=None
+        if typ=="Vasetti":
+            fmt=st.selectbox("Formato",list(FORMATS),index=list(FORMATS).index(r["format"]) if r["format"] in FORMATS else 0,key="eifmt")
+        a,b,c=st.columns(3)
+        qty=a.number_input("Quantità / unità",0.0,100000.0,float(r["qty_units"] or 0),key="eiqty")
+        kg=b.number_input("Kg",0.0,100000.0,float(r["kg"] or 0),key="eikg")
+        movs=["Carico","Scarico","Invasettamento"]
+        movement=c.selectbox("Movimento",movs,index=movs.index(r["movement_type"]) if r["movement_type"] in movs else 0,key="eimov")
+        source=st.text_input("Origine",r["source"] or "",key="eisource")
+        notes=st.text_input("Note",r["notes"] or "",key="einotes")
+        if st.form_submit_button("💾 Salva magazzino"):
+            c=conn(); c.execute("""UPDATE inventory_lots SET movement_date=?,line=?,item_type=?,format=?,
+                qty_units=?,kg=?,movement_type=?,source=?,notes=? WHERE id=?""",
+                (str(dt),ln,typ,fmt,qty,kg,movement,source,notes,r["id"]))
+            c.commit(); c.close(); st.rerun()
+    st.warning("L'eliminazione modifica direttamente le giacenze.")
+    ok=st.checkbox("Confermo eliminazione movimento magazzino",key=f'di_{r["id"]}')
+    if st.button("🗑️ Elimina movimento magazzino",disabled=not ok,key=f'dib_{r["id"]}'):
+        c=conn(); c.execute("DELETE FROM inventory_lots WHERE id=?",(r["id"],)); c.commit(); c.close(); st.rerun()
 
 def page_magazzino():
     st.title("🍯 Magazzino")
@@ -256,6 +379,9 @@ def page_magazzino():
                     VALUES(?,?,?,?,?,?,?,?,?)""",
                     (str(dt),ln,"Vasetti",fmt,qty,kg,"Invasettamento","Produzione","Da miele sfuso"))
                     c.commit(); c.close(); st.rerun()
+
+    with st.expander("✏️ Modifica o elimina dati di magazzino",expanded=False):
+        edit_inventory()
 
 def page_vendite():
     st.title("🧾 Vendite")
@@ -317,7 +443,10 @@ def page_vendite():
     if search: sql+=" AND customer LIKE ?"; args.append("%"+search+"%")
     sql+=" ORDER BY sale_date DESC,id DESC"
     st.dataframe(pd.DataFrame(query(sql,args)),hide_index=True,use_container_width=True)
+    st.subheader("Riepilogo")
     kpis(financials(fl))
+    with st.expander("✏️ Modifica o elimina una vendita",expanded=False):
+        edit_sale()
 
 def cost_form():
     with st.form("cost",clear_on_submit=True):
@@ -387,6 +516,13 @@ def page_cassa():
         with tab:
             f=financials(ln)
             kpis(f)
+            if ln=="Natale":
+                ancora=max(0.0,float(f["costi_eff"])-float(f["incassato"]))
+                st.markdown("#### 🎄 Stato investimento Natale")
+                a,b,c=st.columns(3)
+                a.metric("Investimento / costi",euro(f["costi_eff"]))
+                b.metric("Recuperato con incassi",euro(f["incassato"]))
+                c.metric("Ancora da recuperare",euro(ancora))
             coverage=(f["incassato"]/f["costi_eff"]*100) if f["costi_eff"] else 0
             st.progress(min(1.0,coverage/100),text=f"Copertura costi effettivi con incassi reali: {coverage:.1f}%")
             st.subheader("Registro costi")
@@ -420,6 +556,15 @@ def page_cassa():
         st.dataframe(pd.DataFrame(query("""SELECT move_date Data,person Persona,type Movimento,amount Importo,notes Note
                                           FROM cash_moves ORDER BY move_date DESC,id DESC""")),
                      hide_index=True,use_container_width=True)
+        st.subheader("Situazione personale")
+        a,b=st.columns(2)
+        a.metric("Chiara · saldo movimenti",euro(personal_balance("Chiara")))
+        b.metric("Annalisa · saldo movimenti",euro(personal_balance("Annalisa")))
+        st.caption("Positivo = importo da restituire alla cassa. Negativo = anticipo personale ancora da rimborsare.")
+        with st.expander("✏️ Modifica o elimina un costo",expanded=False):
+            edit_cost()
+        with st.expander("✏️ Modifica o elimina un movimento personale",expanded=False):
+            edit_cash_move()
 
     with tab_hist:
         st.subheader("Andamento mensile")
