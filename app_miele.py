@@ -40,6 +40,29 @@ def conn():
 def euro(x):
     return f"€ {float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+def safe_date(value):
+    """Converte date SQLite/Excel/italiane senza mandare in crash l'interfaccia."""
+    if value is None or str(value).strip()=="":
+        return date.today()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s=str(value).strip()
+    for fmt in ("%Y-%m-%d","%Y-%m-%d %H:%M:%S","%d/%m/%Y","%d-%m-%Y","%d.%m.%Y"):
+        try:
+            candidate=s[:19] if "%H" in fmt else s[:10]
+            return datetime.strptime(candidate,fmt).date()
+        except (ValueError,TypeError):
+            pass
+    try:
+        parsed=pd.to_datetime(s,dayfirst=True,errors="coerce")
+        if not pd.isna(parsed):
+            return parsed.date()
+    except Exception:
+        pass
+    return date.today()
+
 def query(sql, args=()):
     c=conn()
     rows=c.execute(sql,args).fetchall()
@@ -225,7 +248,7 @@ def edit_sale():
     r=labels[st.selectbox("Seleziona vendita",list(labels),key="edit_sale_select")]
     with st.form("edit_sale_form"):
         a,b,c,d=st.columns(4)
-        dt=a.date_input("Data",datetime.strptime(r["sale_date"][:10],"%Y-%m-%d").date())
+        dt=a.date_input("Data",safe_date(r["sale_date"]))
         ln=b.selectbox("Linea",LINES,index=LINES.index(r["line"]) if r["line"] in LINES else 0)
         customer=c.text_input("Cliente",r["customer"])
         fmt=d.selectbox("Formato",list(FORMATS),index=list(FORMATS).index(r["format"]) if r["format"] in FORMATS else 0)
@@ -259,7 +282,7 @@ def edit_cost():
     r=labels[st.selectbox("Seleziona costo",list(labels),key="edit_cost_select")]
     with st.form("edit_cost_form"):
         a,b,c,d=st.columns(4)
-        dt=a.date_input("Data",datetime.strptime(r["cost_date"][:10],"%Y-%m-%d").date(),key="ecdt")
+        dt=a.date_input("Data",safe_date(r["cost_date"]),key="ecdt")
         opts=["Estate","Natale","Generale Apiario"]
         ln=b.selectbox("Attribuzione",opts,index=opts.index(r["line"]) if r["line"] in opts else 0)
         cat=c.selectbox("Categoria",COST_CATS,index=COST_CATS.index(r["category"]) if r["category"] in COST_CATS else len(COST_CATS)-1)
@@ -287,7 +310,7 @@ def edit_cash_move():
     types=["Prelievo da restituire","Restituzione prelievo","Anticipo personale","Rimborso anticipo","Rettifica +","Rettifica -"]
     with st.form("edit_cash_form"):
         a,b,c=st.columns(3)
-        dt=a.date_input("Data",datetime.strptime(r["move_date"][:10],"%Y-%m-%d").date(),key="emdt")
+        dt=a.date_input("Data",safe_date(r["move_date"]),key="emdt")
         person=b.selectbox("Persona",["Chiara","Annalisa"],index=0 if r["person"]=="Chiara" else 1)
         typ=c.selectbox("Movimento",types,index=types.index(r["type"]) if r["type"] in types else 0)
         amount=st.number_input("Importo €",0.0,100000.0,float(r["amount"] or 0),1.0,key="emamt")
@@ -307,7 +330,7 @@ def edit_inventory():
     r=labels[st.selectbox("Seleziona movimento",list(labels),key="edit_inv_select")]
     with st.form("edit_inv_form"):
         a,b,c=st.columns(3)
-        dt=a.date_input("Data",datetime.strptime(r["movement_date"][:10],"%Y-%m-%d").date(),key="eidt")
+        dt=a.date_input("Data",safe_date(r["movement_date"]),key="eidt")
         ln=b.selectbox("Linea",LINES,index=LINES.index(r["line"]) if r["line"] in LINES else 0,key="eiln")
         typ=c.selectbox("Tipo",["Miele sfuso","Vasetti"],index=0 if r["item_type"]=="Miele sfuso" else 1,key="eityp")
         fmt=None
