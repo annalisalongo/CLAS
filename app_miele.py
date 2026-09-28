@@ -1,117 +1,96 @@
-                    if ln not in LINES: ln="Estate"
-                    dt=str(r.get(datec,date.today()))[:10] if datec else str(date.today())
-                    paidtxt=str(r.get(paidc,"")).strip().lower() if paidc else ""
-                    ispaid=1 if paidtxt in ("si","sì","1","true","pagato","yes") else 0
-                    method=str(r.get(methodc,"")) if methodc else ""
-                    collector=str(r.get(collectc,"")) if collectc else ""
-                    items=[]
-                    if fmtc:
-                        f=str(r.get(fmtc,"")).strip()
-                        try:q=int(float(r.get(qtyc,1) or 0)) if qtyc else 1
-                        except:q=0
-                        items=[(f,q)]
-                    else:
-                        for cc,f in [(q1,"1 kg"),(q5,"500 g"),(q25,"250 g")]:
-                            if cc:
-                                try:q=int(float(r.get(cc,0) or 0))
-                                except:q=0
-                                if q:items.append((f,q))
-                    for f,q in items:
-                        if f not in FORMATS or q<=0:continue
-                        fp=f"IMPORT:{h[:10]}:{idx}:{f}"
-                        if db.execute("SELECT 1 FROM sales WHERE notes LIKE ?",("%"+fp+"%",)).fetchone():continue
-                        total=q*FORMATS[f][1]
-                        db.execute("""INSERT INTO sales
-                        (sale_date,line,customer,format,qty,gift_qty,list_unit_price,discount,
-                        actual_total,paid,payment_method,collected_by,notes)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (dt,ln,cust,f,q,0,FORMATS[f][1],0,total,ispaid,method,collector,fp))
-                        inserted+=1
-                report.append(f"Vendite importate: {inserted}")
-            else: report.append("Vendite non importate: colonne non riconosciute.")
+import streamlit as st
+import sqlite3
+from datetime import date
+from pathlib import Path
+import pandas as pd
+import io
+import hashlib
+from datetime import datetime
 
-        cs=next((s for s in xls.sheet_names if "cost" in s.lower() or "cassa" in s.lower()),None)
-        if cs:
-            df=pd.read_excel(xls,cs)
-            desc=col(df,"Voce di costo","Voce","Descrizione")
-            totalc=col(df,"Totale","Importo","Costo")
-            linec=col(df,"Linea","Stagione")
-            datec=col(df,"Data")
-            inserted=0
-            if desc and totalc:
-                for idx,r in df.iterrows():
-                    d=str(r.get(desc,"")).strip()
-                    if not d or d.lower()=="nan":continue
-                    try:val=float(r.get(totalc,0) or 0)
-                    except:continue
-                    if val==0:continue
-                    ln=str(r.get(linec,"Generale Apiario")).strip() if linec else "Generale Apiario"
-                    if ln not in ["Estate","Natale","Generale Apiario"]:ln="Generale Apiario"
-                    dt=str(r.get(datec,date.today()))[:10] if datec else str(date.today())
-                    fp=f"IMPORT:{h[:10]}:{idx}"
-                    if db.execute("SELECT 1 FROM costs WHERE notes LIKE ?",("%"+fp+"%",)).fetchone():continue
-                    db.execute("""INSERT INTO costs
-                    (cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (dt,ln,"Altro",d,1,val,val,"Effettivo","Cassa comune",fp))
-                    inserted+=1
-                report.append(f"Costi importati: {inserted}")
-            else: report.append("Costi non importati: colonne non riconosciute.")
-        db.commit()
-        meta_set("excel_import_"+h,datetime.now().isoformat())
-        return True," | ".join(report) if report else "File letto; nessun foglio riconosciuto."
-    except Exception as e:
-        db.rollback()
-        return False,f"Importazione annullata senza modifiche: {e}"
-    finally:
-        db.close()
+APP_DIR = Path(__file__).resolve().parent
+DB_PATH = APP_DIR / "gestione_miele.db"
 
-def data_admin():
-    st.write("**Migrazione dello storico**")
-    up=st.file_uploader("Excel storico (.xlsx / .xlsm / .xls)",type=["xlsx","xlsm","xls"])
-    if up and st.button("Importa storico Excel"):
-        ok,msg=import_history(up)
-        (st.success if ok else st.warning)(msg)
-    st.divider()
-    st.write("**Export e backup**")
-    if st.button("Prepara export Excel", key="prepare_excel_export"):
-        try:
-            st.session_state["excel_export_bytes"] = export_excel_bytes()
-            st.success("Export Excel pronto.")
-        except Exception as e:
-            st.error(f"Impossibile preparare l’export Excel: {e}")
-    if st.session_state.get("excel_export_bytes"):
-        st.download_button("⬇️ Scarica gestionale in Excel", data=st.session_state["excel_export_bytes"],
-            file_name=f"CLAS_export_{date.today()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_excel_export")
-    if DB_PATH.exists():
-        st.download_button("🗄️ Backup database",DB_PATH.read_bytes(),
-            file_name=f"gestione_miele_{date.today()}.db",mime="application/octet-stream")
-    st.caption("Il codice va su Git. Il database operativo va salvato con backup, non versionato nel repository.")
+st.set_page_config(page_title="CLAS • Gestione Miele", page_icon="🍯", layout="wide")
 
+FORMATS = {"1 kg": (1.0, 18.0), "500 g": (0.5, 10.0), "250 g": (0.25, 6.0)}
+LINES = ["Estate", "Natale"]
+PAY_METHODS = ["Contanti", "Bonifico", "PayPal", "Satispay", "Altro"]
+PEOPLE = ["Cassa comune", "Chiara", "Annalisa"]
+COST_CATS = [
+    "Miele acquistato","Vasetti / invasettamento","Etichette / packaging",
+    "Smielatura","Laboratorio / pulizia","Trattamenti api","Nutrizione",
+    "Attrezzatura","Trasporto","Altro"
+]
+COST_STATUS = ["Effettivo", "Previsionale"]
 
-def sidebar_admin():
-    st.sidebar.title("CLAS 🍯")
-    st.sidebar.caption("Gestione miele • obiettivo: apiario autosufficiente")
-    with st.sidebar.expander("⚙️ Dati iniziali / migrazione"):
-        st.write("Dato certo 25/09/2026:")
-        st.write("• 50 kg miele Natale")
-        st.write("• 2 secchi da 25 kg")
-        st.write("• €8/kg = €400 effettivi")
-        if not meta_get("update_2026_09_25"):
-            if st.button("Applica aggiornamento reale 25/09"):
-                apply_known_update(); st.rerun()
-        else:
-            st.success("Aggiornamento 25/09 già applicato.")
-    with st.sidebar.expander("📦 Import / Export / Backup"):
-        data_admin()
+st.markdown("""
+<style>
+.block-container{padding-top:1.1rem;padding-bottom:2rem}
+[data-testid="stMetric"]{background:#fff;border:1px solid #eee7dc;padding:12px;border-radius:14px}
+div[data-testid="stDataFrame"]{border:1px solid #eee7dc;border-radius:12px}
+.smallnote{color:#6b7280;font-size:.86rem}
+</style>
+""", unsafe_allow_html=True)
 
-init_db()
-# Per un DB nuovo applica subito i dati reali; su DB esistente il marker evita duplicati.
-apply_known_update()
-sidebar_admin()
+def conn():
+    c = sqlite3.connect(DB_PATH)
+    c.row_factory = sqlite3.Row
+    return c
 
-page=st.sidebar.radio("Sezione",["Magazzino","Vendite","Costi & Cassa"])
-if page=="Magazzino": page_magazzino()
-elif page=="Vendite": page_vendite()
-else: page_cassa()
+def euro(x):
+    return f"€ {float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def query(sql, args=()):
+    c=conn()
+    rows=c.execute(sql,args).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+def scalar(sql,args=()):
+    rows=query(sql,args)
+    if not rows: return 0
+    return list(rows[0].values())[0] or 0
+
+def init_db():
+    c=conn()
+    q=c.cursor()
+    q.executescript("""
+    CREATE TABLE IF NOT EXISTS app_meta(
+        key TEXT PRIMARY KEY, value TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_lots(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        movement_date TEXT NOT NULL,
+        line TEXT NOT NULL,
+        item_type TEXT NOT NULL,
+        format TEXT,
+        qty_units REAL DEFAULT 0,
+        kg REAL DEFAULT 0,
+        movement_type TEXT NOT NULL,
+        source TEXT,
+        notes TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS sales(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sale_date TEXT NOT NULL,
+        line TEXT NOT NULL,
+        customer TEXT NOT NULL,
+        format TEXT NOT NULL,
+        qty INTEGER DEFAULT 0,
+        gift_qty INTEGER DEFAULT 0,
+        list_unit_price REAL DEFAULT 0,
+        discount REAL DEFAULT 0,
+        actual_total REAL DEFAULT 0,
+        paid INTEGER DEFAULT 0,
+        payment_method TEXT,
+        collected_by TEXT,
+        notes TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS costs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cost_date TEXT NOT NULL,
+        line TEXT NOT NULL,
+        category TEXT NOT NULL,
