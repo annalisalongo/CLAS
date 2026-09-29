@@ -98,6 +98,21 @@ def safe_date(value):
         pass
     return date.today()
 
+def migrate_cost_ownership():
+    c=conn()
+    cols=[r[1] for r in c.execute("PRAGMA table_info(costs)").fetchall()]
+    if "paid_by_real" not in cols:
+        c.execute("ALTER TABLE costs ADD COLUMN paid_by_real TEXT DEFAULT ''")
+        c.execute("""UPDATE costs SET paid_by_real=
+                     CASE WHEN paid_by IN ('Chiara','Annalisa','Cassa comune')
+                          THEN paid_by ELSE 'Da definire' END
+                     WHERE COALESCE(paid_by_real,'')=''""")
+    c.execute("""UPDATE costs SET notes=''
+                 WHERE notes LIKE 'CLASXLS:%'
+                    OR notes LIKE '%Importato dallo storico Excel%'""")
+    c.commit(); c.close()
+
+
 def query(sql, args=()):
     c=conn()
     rows=c.execute(sql,args).fetchall()
@@ -319,30 +334,35 @@ def edit_sale():
 
 def edit_cost():
     rows=query("SELECT * FROM costs ORDER BY cost_date DESC,id DESC")
-    if not rows: st.info("Nessun costo."); return
-    labels={f'#{r["id"]} · {r["cost_date"]} · {r["description"]} · {euro(r["total"])}':r for r in rows}
+    if not rows:
+        st.info("Nessun costo."); return
+    labels={f'#{r["id"]} · {r["cost_date"] or "Data da inserire"} · {r["description"]} · {euro(r["total"])}':r for r in rows}
     r=labels[st.selectbox("Seleziona costo",list(labels),key="edit_cost_select")]
     with st.form("edit_cost_form"):
         a,b,c,d=st.columns(4)
         dt=a.date_input("Data",safe_date(r["cost_date"]),key="ecdt")
         opts=["Estate","Natale","Generale Apiario"]
-        ln=b.selectbox("Attribuzione",opts,index=opts.index(r["line"]) if r["line"] in opts else 0)
+        ln=b.selectbox("Linea",opts,index=opts.index(r["line"]) if r["line"] in opts else 0)
         cat=c.selectbox("Categoria",COST_CATS,index=COST_CATS.index(r["category"]) if r["category"] in COST_CATS else len(COST_CATS)-1)
-        status=d.selectbox("Tipo",COST_STATUS,index=COST_STATUS.index(r["status"]) if r["status"] in COST_STATUS else 0)
-        desc=st.text_input("Voce",r["description"])
+        status=d.selectbox("Tipo costo",COST_STATUS,index=COST_STATUS.index(r["status"]) if r["status"] in COST_STATUS else 0)
+        desc=st.text_input("Voce di costo",r["description"])
         a,b,c=st.columns(3)
         qty=a.number_input("Quantità",0.0,100000.0,float(r["qty"] or 0),key="ecqty")
         unit=b.number_input("Costo unitario €",0.0,100000.0,float(r["unit_cost"] or 0),key="ecunit")
-        paidby=c.selectbox("Pagato da",PEOPLE,index=PEOPLE.index(r["paid_by"]) if r["paid_by"] in PEOPLE else 0)
+        payers=["Cassa comune","Chiara","Annalisa","Da definire"]
+        current=(r["paid_by_real"] or r["paid_by"] or "Da definire")
+        payer=c.selectbox("Pagato realmente da",payers,index=payers.index(current) if current in payers else 3)
         notes=st.text_input("Note",r["notes"] or "",key="ecnotes")
+        st.caption("Gli anticipi personali restano costi del miele: qui indichiamo soltanto chi li ha finanziati.")
         if st.form_submit_button("💾 Salva costo"):
-            c=conn(); c.execute("""UPDATE costs SET cost_date=?,line=?,category=?,description=?,qty=?,unit_cost=?,
-                total=?,status=?,paid_by=?,notes=? WHERE id=?""",
-                (str(dt),ln,cat,desc,qty,unit,qty*unit,status,paidby,notes,r["id"]))
-            c.commit(); c.close(); st.rerun()
+            db=conn()
+            db.execute("""UPDATE costs SET cost_date=?,line=?,category=?,description=?,qty=?,unit_cost=?,
+                total=?,status=?,paid_by=?,paid_by_real=?,notes=? WHERE id=?""",
+                (str(dt),ln,cat,desc,qty,unit,qty*unit,status,payer,payer,notes,r["id"]))
+            db.commit(); db.close(); st.success("Costo aggiornato."); st.rerun()
     ok=st.checkbox("Confermo eliminazione costo",key=f'dc_{r["id"]}')
     if st.button("🗑️ Elimina costo",disabled=not ok,key=f'dcb_{r["id"]}'):
-        c=conn(); c.execute("DELETE FROM costs WHERE id=?",(r["id"],)); c.commit(); c.close(); st.rerun()
+        db=conn(); db.execute("DELETE FROM costs WHERE id=?",(r["id"],)); db.commit(); db.close(); st.rerun()
 
 def edit_cash_move():
     rows=query("SELECT * FROM cash_moves ORDER BY move_date DESC,id DESC")
@@ -665,6 +685,23 @@ def page_cassa():
         st.dataframe(pd.DataFrame(query("""SELECT move_date Data,person Persona,type Movimento,amount Importo,notes Note
                                           FROM cash_moves ORDER BY move_date DESC,id DESC""")),
                      hide_index=True,use_container_width=True)
+        st.subheader("Chi ha finanziato i costi")
+        inv_rows=query("""SELECT COALESCE(NULLIF(paid_by_real,''),paid_by,'Da definire') Persona,
+                                 COALESCE(SUM(total),0) Totale
+                          FROM costs WHERE status='Effettivo'
+                          GROUP BY COALESCE(NULLIF(paid_by_real,''),paid_by,'Da definire')
+                          ORDER BY Totale DESC""")
+        if inv_rows:
+            chiara=sum(float(x["Totale"] or 0) for x in inv_rows if x["Persona"]=="Chiara")
+            annalisa=sum(float(x["Totale"] or 0) for x in inv_rows if x["Persona"]=="Annalisa")
+            comune=sum(float(x["Totale"] or 0) for x in inv_rows if x["Persona"]=="Cassa comune")
+            a,b,c=st.columns(3)
+            a.metric("Investito da Chiara",euro(chiara))
+            b.metric("Investito da Annalisa",euro(annalisa))
+            c.metric("Pagato dalla cassa",euro(comune))
+            st.dataframe(pd.DataFrame(inv_rows),hide_index=True,use_container_width=True)
+            st.caption("Il margine considera tutti i costi, anche quelli anticipati personalmente.")
+
         st.subheader("Situazione personale")
         a,b=st.columns(2)
         a.metric("Chiara · saldo movimenti",euro(personal_balance("Chiara")))
@@ -985,6 +1022,8 @@ apply_known_update()
 sidebar_admin()
 
 reconcile_known_stock()
+
+migrate_cost_ownership()
 
 page=st.sidebar.radio("Sezione",["Magazzino","Vendite","Costi & Cassa"])
 if page=="Magazzino": page_magazzino()
