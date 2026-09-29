@@ -537,7 +537,7 @@ def page_vendite():
                 collected=y.selectbox("Incassato da",PEOPLE)
             notes=st.text_input("Note")
             if st.form_submit_button("Registra vendita"):
-                available=jar_stock(ln).get((ln,fmt),0)
+                available=next((float(x["Residuo vasetti"]) for x in jar_stock(ln) if x["Linea"]==ln and x["Formato"]==fmt),0.0)
                 needed=qty+gift
                 if not customer.strip():
                     st.error("Inserisci il cliente.")
