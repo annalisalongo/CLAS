@@ -12,6 +12,25 @@ DB_PATH = APP_DIR / "gestione_miele.db"
 
 st.set_page_config(page_title="CLAS • Gestione Miele", page_icon="🍯", layout="wide")
 
+st.markdown("""
+<style>
+:root { --clas-border: color-mix(in srgb, var(--text-color) 18%, transparent); --clas-soft: color-mix(in srgb, var(--text-color) 7%, transparent); }
+.block-container { max-width:1400px; padding-top:1.4rem; padding-bottom:3rem; }
+h1,h2,h3,h4 { letter-spacing:-0.02em; }
+[data-testid="stMetric"] { background:var(--clas-soft); border:1px solid var(--clas-border); border-radius:14px; padding:14px 16px; }
+[data-testid="stMetricLabel"], .stCaption, [data-testid="stCaptionContainer"] { opacity:.78; }
+[data-testid="stMetricValue"] { font-weight:700; }
+[data-testid="stExpander"], [data-testid="stDataFrame"] { border:1px solid var(--clas-border); border-radius:12px; overflow:hidden; }
+[data-testid="stForm"] { border:1px solid var(--clas-border); border-radius:14px; padding:1rem; background:var(--clas-soft); }
+[data-testid="stSidebar"] { border-right:1px solid var(--clas-border); }
+.stButton>button,.stDownloadButton>button,[data-testid="stFormSubmitButton"]>button { border-radius:10px; border:1px solid var(--clas-border); font-weight:600; }
+[data-baseweb="input"]>div,[data-baseweb="select"]>div,[data-baseweb="textarea"]>div { border-color:var(--clas-border)!important; }
+hr { border-color:var(--clas-border)!important; }
+[data-testid="stAlert"] { border-radius:12px; }
+@media (max-width:768px){.block-container{padding-left:1rem;padding-right:1rem}[data-testid="stMetric"]{padding:10px 12px}}
+</style>
+""", unsafe_allow_html=True)
+
 FORMATS = {"1 kg": (1.0, 18.0), "500 g": (0.5, 10.0), "250 g": (0.25, 6.0)}
 LINES = ["Estate", "Natale"]
 PAY_METHODS = ["Contanti", "Bonifico", "PayPal", "Satispay", "Altro"]
