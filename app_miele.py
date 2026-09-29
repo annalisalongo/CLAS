@@ -426,7 +426,15 @@ def page_magazzino():
 
     # Riepilogo immediato
     bulk=bulk_stock(None if fl=="Tutto" else fl)
-    bulk_kg=sum(float(r["Kg residui"] or 0) for r in bulk) if bulk else 0.0
+    if isinstance(bulk,(int,float)):
+        bulk_kg=float(bulk)
+    elif isinstance(bulk,dict):
+        bulk_kg=float(bulk.get("Kg residui",bulk.get("kg",0)) or 0)
+    else:
+        try:
+            bulk_kg=sum(float(r.get("Kg residui",r.get("kg",0)) or 0) for r in bulk)
+        except Exception:
+            bulk_kg=0.0
     jar_kg=sum(max(0.0,float(r["Kg invasettati residui"] or 0)) for r in rows)
     jar_count=sum(max(0.0,float(r["Residuo vasetti"] or 0)) for r in rows)
     stock_value=0.0
@@ -448,7 +456,12 @@ def page_magazzino():
     st.dataframe(show,hide_index=True,use_container_width=True)
 
     st.subheader("Miele sfuso")
-    bulk_df=pd.DataFrame(bulk)
+    if isinstance(bulk,(int,float)):
+        bulk_df=pd.DataFrame([{"Vista":fl,"Kg residui":round(float(bulk),2)}])
+    elif isinstance(bulk,dict):
+        bulk_df=pd.DataFrame([bulk])
+    else:
+        bulk_df=pd.DataFrame(bulk)
     st.dataframe(bulk_df,hide_index=True,use_container_width=True)
 
     with st.expander("🏺 Registra invasettamento",expanded=False):
