@@ -98,6 +98,26 @@ def safe_date(value):
         pass
     return date.today()
 
+def migrate_sales_and_transfers():
+    """Aggiunge in modo compatibile consegna vendite e trasferimenti interni di cassa."""
+    c=conn()
+    sales_cols=[r[1] for r in c.execute("PRAGMA table_info(sales)").fetchall()]
+    if "delivered" not in sales_cols:
+        # NULL = storico da verificare: non inventiamo lo stato delle vecchie consegne.
+        c.execute("ALTER TABLE sales ADD COLUMN delivered INTEGER")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cash_transfers(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transfer_date TEXT NOT NULL,
+            from_holder TEXT NOT NULL,
+            to_holder TEXT NOT NULL DEFAULT 'Cassa comune',
+            amount REAL NOT NULL,
+            payment_method TEXT,
+            notes TEXT
+        )
+    """)
+    c.commit(); c.close()
+
 def migrate_cost_ownership():
     c=conn()
     cols=[r[1] for r in c.execute("PRAGMA table_info(costs)").fetchall()]
@@ -316,6 +336,9 @@ def edit_sale():
         discount=d.number_input("Sconto €",0.0,10000.0,float(r["discount"] or 0),0.5)
         actual=max(0,qty*unit-discount)
         paid=st.selectbox("Pagato?",["No","Sì"],index=1 if r["paid"] else 0)
+        delivered_opts=["Da verificare","No","Sì"]
+        delivered_current="Da verificare" if r.get("delivered") is None else ("Sì" if r.get("delivered")==1 else "No")
+        delivered=st.selectbox("Consegnato?",delivered_opts,index=delivered_opts.index(delivered_current))
         a,b=st.columns(2)
         methods=[""]+PAY_METHODS
         collectors=[""]+PEOPLE
@@ -325,8 +348,9 @@ def edit_sale():
         st.caption(f"Nuovo totale effettivo: {euro(actual)}")
         if st.form_submit_button("💾 Salva modifiche"):
             c=conn(); c.execute("""UPDATE sales SET sale_date=?,line=?,customer=?,format=?,qty=?,gift_qty=?,
-                list_unit_price=?,discount=?,actual_total=?,paid=?,payment_method=?,collected_by=?,notes=? WHERE id=?""",
-                (str(dt),ln,customer.strip(),fmt,qty,gift,unit,discount,actual,1 if paid=="Sì" else 0,method,collector,notes,r["id"]))
+                list_unit_price=?,discount=?,actual_total=?,paid=?,payment_method=?,collected_by=?,notes=?,delivered=? WHERE id=?""",
+                (str(dt),ln,customer.strip(),fmt,qty,gift,unit,discount,actual,1 if paid=="Sì" else 0,method,collector,notes,
+                 None if delivered=="Da verificare" else (1 if delivered=="Sì" else 0),r["id"]))
             c.commit(); c.close(); st.rerun()
     ok=st.checkbox("Confermo eliminazione vendita",key=f'ds_{r["id"]}')
     if st.button("🗑️ Elimina vendita",disabled=not ok,key=f'dsb_{r["id"]}'):
@@ -530,6 +554,7 @@ def page_vendite():
             actual=max(0,list_total-discount)
             st.caption(f"Listino {euro(list_total)} → sconto {euro(discount)} → totale effettivo **{euro(actual)}**")
             paid=st.selectbox("Mi ha pagato?",["No","Sì"])
+            delivered=st.selectbox("Consegnato?",["Sì","No"])
             method=collected=""
             if paid=="Sì":
                 x,y=st.columns(2)
@@ -547,10 +572,10 @@ def page_vendite():
                     c=conn()
                     c.execute("""INSERT INTO sales
                     (sale_date,line,customer,format,qty,gift_qty,list_unit_price,discount,
-                     actual_total,paid,payment_method,collected_by,notes)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     actual_total,paid,payment_method,collected_by,notes,delivered)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (str(dt),ln,customer.strip(),fmt,qty,gift,unit,discount,actual,
-                     1 if paid=="Sì" else 0,method,collected,notes))
+                     1 if paid=="Sì" else 0,method,collected,notes,1 if delivered=="Sì" else 0))
                     c.commit(); c.close(); st.rerun()
 
     a,b,c=st.columns(3)
@@ -561,7 +586,9 @@ def page_vendite():
            qty Quantità,gift_qty Omaggi,list_unit_price Prezzo_unitario,
            discount Sconto,actual_total Totale,
            CASE paid WHEN 1 THEN 'Sì' ELSE 'No' END Pagato,
-           payment_method Metodo,collected_by Incassato_da,notes Note
+           payment_method Metodo,collected_by Incassato_da,
+           CASE delivered WHEN 1 THEN 'Sì' WHEN 0 THEN 'No' ELSE 'Da verificare' END Consegnato,
+           notes Note
            FROM sales WHERE 1=1"""
     args=[]
     if fl!="Tutto": sql+=" AND line=?"; args.append(fl)
@@ -592,48 +619,74 @@ def cost_form():
         notes=st.text_input("Note")
         if st.form_submit_button("Registra costo"):
             c=conn()
-            c.execute("""INSERT INTO costs(cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes)
-                         VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                      (str(dt),ln,cat,desc,qty,unit,qty*unit,status,paidby,notes))
+            c.execute("""INSERT INTO costs(cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes,paid_by_real)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                      (str(dt),ln,cat,desc,qty,unit,qty*unit,status,paidby,notes,paidby))
             c.commit(); c.close(); st.rerun()
 
 def simulator():
-    st.subheader("🧪 Simulatore invasettamento Natale")
-    available=bulk_stock("Natale")
-    st.caption(f"Miele sfuso Natale disponibile adesso: **{available:g} kg**. Prezzi vetro noti: 500 g = €0,45; 250 g = €0,35.")
-    maxkg=float(max(0,available))
+    st.subheader("🧪 Simulatore — a fine incasso")
+    available=float(max(0,bulk_stock("Natale")))
+    st.caption(f"Miele sfuso Natale disponibile: **{available:g} kg**. Il calcolo finale considera vendite già registrate, stock residuo, costi effettivi e il vetro della simulazione.")
+
     a,b=st.columns(2)
-    kg500=a.number_input("Kg da destinare ai 500 g",0.0,maxkg,min(maxkg,35.0),0.5)
-    remaining=max(0,maxkg-kg500)
+    kg500=a.number_input("Kg da destinare ai 500 g",0.0,available,min(available,35.0),0.5)
+    remaining=max(0.0,available-kg500)
     kg250=b.number_input("Kg da destinare ai 250 g",0.0,remaining,min(remaining,15.0),0.25)
-    loose=maxkg-kg500-kg250
+
+    loose=max(0.0,available-kg500-kg250)
     n500=int(kg500/0.5)
     n250=int(kg250/0.25)
     glass=n500*0.45+n250*0.35
-    revenue=n500*10+n250*6
-    honey_cost=(kg500+kg250)*8
-    contribution=revenue-honey_cost-glass
-    a,b,c,d,e=st.columns(5)
-    a.metric("500 g da comprare",n500)
-    b.metric("250 g da comprare",n250)
-    c.metric("Costo vetro previsto",euro(glass))
-    d.metric("Ricavo potenziale",euro(revenue))
-    e.metric("Miele lasciato sfuso",f"{loose:g} kg")
-    st.info(f"Su questa simulazione: costo miele attribuito {euro(honey_cost)} + vetro {euro(glass)}. Margine potenziale prima di etichette/altri costi: **{euro(contribution)}**.")
+    new_revenue=n500*10+n250*6
+
+    # Ricavi già realizzati + valore a listino dei vasetti ancora disponibili.
+    f_all=financials("Tutto")
+    current_sales=float(f_all["vendite"] or 0)
+    effective_costs=float(f_all["costi_eff"] or 0)
+    outstanding=float(f_all["credito"] or 0)
+    residual_stock_value=sum(
+        max(0.0,float(r["Residuo vasetti"] or 0))*FORMATS[r["Formato"]][1]
+        for r in jar_stock("Tutto")
+    )
+    final_revenue=current_sales+residual_stock_value+new_revenue
+    final_costs=effective_costs+glass
+    final_profit=final_revenue-final_costs
+    margin=(final_profit/final_revenue*100) if final_revenue else 0.0
+    still_to_collect=max(0.0,outstanding)+residual_stock_value+new_revenue
+
+    a,b,c,d=st.columns(4)
+    a.metric("💰 Incasso totale previsto",euro(final_revenue))
+    b.metric("📉 Costi totali previsti",euro(final_costs))
+    c.metric("🏆 Guadagno finale totale",euro(final_profit))
+    d.metric("📊 Margine finale",f"{margin:.1f}%")
+
+    a,b,c=st.columns(3)
+    a.metric("⏳ Ancora da incassare/vendere",euro(still_to_collect))
+    b.metric("🫙 Nuovi 500 g",n500)
+    c.metric("🫙 Nuovi 250 g",n250)
+
+    st.caption(
+        f"Nel totale: vendite già registrate {euro(current_sales)} + stock residuo a listino "
+        f"{euro(residual_stock_value)} + nuovi vasetti simulati {euro(new_revenue)}. "
+        f"Costi effettivi già registrati {euro(effective_costs)} + nuovo vetro {euro(glass)}. "
+        "Gli anticipi personali di Chiara e Annalisa restano inclusi nei costi."
+    )
+    if loose>0:
+        st.info(f"Resterebbero **{loose:g} kg** di miele Natale sfuso, non valorizzati nel guadagno finale finché non scegli come invasettarli.")
 
     if st.button("Salva il vetro simulato come COSTO PREVISIONALE"):
-        c=conn()
-        today=str(date.today())
+        c=conn(); today=str(date.today())
         if n500:
-            c.execute("""INSERT INTO costs(cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes)
-            VALUES(?,?,?,?,?,?,?,?,?,?)""",(today,"Natale","Vasetti / invasettamento",
-            "Vasetti 500 g - simulazione",n500,.45,n500*.45,"Previsionale","Cassa comune","Generato dal simulatore"))
+            c.execute("""INSERT INTO costs(cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes,paid_by_real)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(today,"Natale","Vasetti / invasettamento",
+            "Vasetti 500 g - simulazione",n500,.45,n500*.45,"Previsionale","Cassa comune","Generato dal simulatore","Cassa comune"))
         if n250:
-            c.execute("""INSERT INTO costs(cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes)
-            VALUES(?,?,?,?,?,?,?,?,?,?)""",(today,"Natale","Vasetti / invasettamento",
-            "Vasetti 250 g - simulazione",n250,.35,n250*.35,"Previsionale","Cassa comune","Generato dal simulatore"))
+            c.execute("""INSERT INTO costs(cost_date,line,category,description,qty,unit_cost,total,status,paid_by,notes,paid_by_real)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(today,"Natale","Vasetti / invasettamento",
+            "Vasetti 250 g - simulazione",n250,.35,n250*.35,"Previsionale","Cassa comune","Generato dal simulatore","Cassa comune"))
         c.commit(); c.close()
-        st.success("Previsione salvata. Quando comprerete davvero i vasetti, trasformate/eliminate la previsione e registrate il costo effettivo.")
+        st.success("Previsione vetro salvata.")
 
 def page_cassa():
     st.title("💶 Costi & Cassa")
@@ -685,6 +738,62 @@ def page_cassa():
         st.dataframe(pd.DataFrame(query("""SELECT move_date Data,person Persona,type Movimento,amount Importo,notes Note
                                           FROM cash_moves ORDER BY move_date DESC,id DESC""")),
                      hide_index=True,use_container_width=True)
+        st.subheader("💳 Metodi di pagamento e cassa")
+        pay_rows=query("""SELECT COALESCE(NULLIF(payment_method,''),'Non indicato') Metodo,
+                                  COUNT(*) Operazioni, COALESCE(SUM(actual_total),0) Incassato
+                           FROM sales WHERE paid=1
+                           GROUP BY COALESCE(NULLIF(payment_method,''),'Non indicato')
+                           ORDER BY Incassato DESC""")
+        if pay_rows:
+            st.dataframe(pd.DataFrame(pay_rows),hide_index=True,use_container_width=True)
+        else:
+            st.info("Non risultano ancora incassi registrati.")
+
+        holders=["Chiara","Annalisa","Cassa comune"]
+        collected={h:float(scalar("SELECT COALESCE(SUM(actual_total),0) FROM sales WHERE paid=1 AND collected_by=?",(h,))) for h in holders}
+        transfers_out={h:float(scalar("SELECT COALESCE(SUM(amount),0) FROM cash_transfers WHERE from_holder=?",(h,))) for h in holders}
+        transfers_in={h:float(scalar("SELECT COALESCE(SUM(amount),0) FROM cash_transfers WHERE to_holder=?",(h,))) for h in holders}
+        common_costs=float(scalar("""SELECT COALESCE(SUM(total),0) FROM costs
+                                    WHERE status='Effettivo'
+                                    AND COALESCE(NULLIF(paid_by_real,''),paid_by)='Cassa comune'"""))
+        balances={h:collected[h]-transfers_out[h]+transfers_in[h] for h in holders}
+        balances["Cassa comune"]-=common_costs
+
+        a,b,c=st.columns(3)
+        a.metric("Da versare · Chiara",euro(max(0,balances["Chiara"])))
+        b.metric("Da versare · Annalisa",euro(max(0,balances["Annalisa"])))
+        c.metric("Saldo Cassa comune",euro(balances["Cassa comune"]))
+        st.caption("I trasferimenti sono movimenti interni: non cambiano vendite, costi o guadagno.")
+
+        with st.expander("⚖️ Pareggia / sposta soldi in Cassa comune",expanded=False):
+            source=st.selectbox("Da",["Chiara","Annalisa"],key="transfer_source")
+            suggested=max(0.0,balances[source])
+            with st.form("transfer_to_common",clear_on_submit=True):
+                dt=st.date_input("Data trasferimento",date.today(),key="transfer_date")
+                amount=st.number_input("Importo €",0.0,100000.0,float(round(suggested,2)),0.5,key="transfer_amount")
+                method=st.selectbox("Metodo",PAY_METHODS,key="transfer_method")
+                notes=st.text_input("Note",key="transfer_notes")
+                st.caption(f"Per pareggiare completamente {source}: {euro(suggested)}.")
+                if st.form_submit_button("Sposta in Cassa comune"):
+                    if amount<=0:
+                        st.error("Inserisci un importo maggiore di zero.")
+                    elif amount>suggested+0.005:
+                        st.error(f"L'importo supera il saldo da versare di {source}: {euro(suggested)}.")
+                    else:
+                        db=conn()
+                        db.execute("""INSERT INTO cash_transfers
+                            (transfer_date,from_holder,to_holder,amount,payment_method,notes)
+                            VALUES(?,?,?,?,?,?)""",
+                            (str(dt),source,"Cassa comune",amount,method,notes))
+                        db.commit(); db.close(); st.rerun()
+
+        tr=query("""SELECT transfer_date Data,from_holder Da,to_holder A,amount Importo,
+                           payment_method Metodo,notes Note
+                    FROM cash_transfers ORDER BY transfer_date DESC,id DESC""")
+        if tr:
+            st.markdown("##### Trasferimenti registrati")
+            st.dataframe(pd.DataFrame(tr),hide_index=True,use_container_width=True)
+
         st.subheader("Chi ha finanziato i costi")
         inv_rows=query("""SELECT COALESCE(NULLIF(paid_by_real,''),paid_by,'Da definire') Persona,
                                  COALESCE(SUM(total),0) Totale
@@ -1039,6 +1148,7 @@ def sidebar_admin():
         data_admin()
 
 init_db()
+migrate_sales_and_transfers()
 # Per un DB nuovo applica subito i dati reali; su DB esistente il marker evita duplicati.
 apply_known_update()
 sidebar_admin()
